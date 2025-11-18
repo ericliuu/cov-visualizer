@@ -88,53 +88,6 @@ def load_coverage_path():
     save_index()
     return jsonify({'status': 'ok', 'functions_loaded': len(FUNCTIONS)})
 
-#@app.route('/upload-coverage', methods=['POST'])
-#def upload_coverage():
-#    global FUNCTIONS
-#    if 'file' not in request.files:
-#        return jsonify({'error': 'no file provided'}), 400
-#    f = request.files['file']
-#    try:
-#        data = json.load(f)
-#    except Exception as e:
-#        return jsonify({'error': f'invalid JSON: {e}'}), 400
-#
-#    FUNCTIONS = []
-#
-#    def process_function_entry(entry, source_file=None):
-#        name = entry.get('name') or entry.get('funcName') or entry.get('function') or '<unknown>'
-#        file = source_file or entry.get('filename') or entry.get('file') or '<unknown>'
-#        regions = entry.get('regions') or entry.get('ranges') or []
-#        norm_regions = []
-#        if isinstance(regions, list):
-#            for r in regions:
-#                if isinstance(r, list) and len(r) >= 5:
-#                    line = r[0]
-#                    count = r[4]
-#                    norm_regions.append({'line': line, 'count': count})
-#                elif isinstance(r, dict):
-#                    line = r.get('line') or r.get('startLine') or (r.get('start') or {}).get('line')
-#                    count = r.get('count') or r.get('executionCount') or 0
-#                    norm_regions.append({'line': line, 'count': count})
-#
-#        total = len(norm_regions)
-#        covered = sum(1 for rr in norm_regions if rr.get('count', 0) > 0)
-#        pct = (covered / total * 100) if total else None
-#        FUNCTIONS.append({'name': name, 'file': file, 'covered': covered, 'total': total, 'coveragePct': pct})
-#
-#    for d in data.get('data', []):
-#        for fobj in d.get('files', []):
-#            for func in fobj.get('functions', []):
-#                process_function_entry(func, fobj.get('filename'))
-#        for func in d.get('functions', []):
-#            process_function_entry(func)
-#
-#    for func in data.get('functions', []):
-#        process_function_entry(func)
-#
-#    save_index()
-#    return jsonify({'status': 'ok', 'functions_loaded': len(FUNCTIONS)})
-
 @app.route('/load-cfg-dir', methods=['POST'])
 def load_cfg_dir():
     global CFG_MAP
@@ -158,7 +111,12 @@ def load_cfg_dir():
                             name = f.get('name')
                             if not name:
                                 continue
-                            CFG_MAP[name] = {'cfg': f, 'module': obj.get('modules')}
+                            CFG_MAP[name] = {
+                               "blocks": f.get("blocks"),
+                               "edges": f.get("edges"),
+                               "entry": f.get("entry"),
+                               "returns": f.get("returns")
+                            }
                             functions_with_cfg += 1
                 except Exception as e:
                     print('Failed to parse cfg', full, e)
@@ -218,9 +176,11 @@ def list_functions():
 @app.route('/function/<path:name>')
 def get_function(name):
     nm = name
+    if ":" in nm:
+        nm = nm.split(":")[-1]
     cfg_entry = CFG_MAP.get(nm)
-    coverage = next((f for f in FUNCTIONS if f.get('name') == nm), None)
-    return jsonify({'cfg': cfg_entry.get('cfg') if cfg_entry else None, 'module': cfg_entry.get('module') if cfg_entry else None, 'coverage': coverage})
+    coverage = next((f for f in FUNCTIONS if f.get('name') == name), None)
+    return jsonify({'cfg': cfg_entry, 'coverage': coverage})
 
 if __name__ == '__main__':
     load_index()

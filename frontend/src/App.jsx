@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
 import * as d3 from "d3";
+import "./App.css";
 
 function formatPct(p) {
   if (p === null || p === undefined) return "n/a";
@@ -95,7 +96,9 @@ export default function App() {
       if (res.ok) {
         setCfgData(j.cfg || null);
         setStatus("");
-        setTimeout(() => renderCfg(j.cfg), 50);
+        console.log("Function click → raw server JSON:", j);
+        console.log("Extracted cfg:", j.cfg);
+        renderCfg(j.cfg);
       } else {
         setStatus(`Failed to fetch CFG: ${j.error}`);
       }
@@ -112,56 +115,257 @@ export default function App() {
       container.innerText = "No CFG available for this function.";
       return;
     }
-
+  
+    // blocks: object map { "%3": { start_line:..., end_line:... }, ... }
+    const blocksMap = cfg.blocks && typeof cfg.blocks === "object" ? Object.assign({}, cfg.blocks) : {};
+    const blockIds = Object.keys(blocksMap);
+  
+    // edges: may be null, [], or [{src, dst, type}, ...]
+    const edges = Array.isArray(cfg.edges) ? cfg.edges.filter(Boolean) : [];
+  
+    // calls: may be null or array of { src, dst, type }
+    const calls = Array.isArray(cfg.calls) ? cfg.calls.filter(Boolean) : [];
+  
+    // returns: array of { block: "%x", type: "ret" } or similar
+    const returns = Array.isArray(cfg.returns) ? cfg.returns.map((r) => r.block).filter(Boolean) : [];
+  
+    const entry = cfg.entry || blockIds[0];
+    if (!entry) {
+      container.innerText = "CFG has no entry block.";
+      return;
+    }
+  
+    // Build adjacency map from edges (src -> [dst,...])
+    const adjacency = {};
+    for (const e of edges) {
+      const s = e.src || e.from || null;
+      const d = e.dst || e.to || null;
+      if (!s || !d) continue;
+      adjacency[s] = adjacency[s] || [];
+      adjacency[s].push({ to: d, type: e.type || null });
+    }
+  
+    // Build calls map from calls (src -> [dst,...])
+    const callsMap = {};
+    for (const c of calls) {
+      const s = c.src || null;
+      const d = c.dst || null;
+      if (!s || !d) continue;
+      callsMap[s] = callsMap[s] || [];
+      callsMap[s].push({ dst: d, type: c.type || null });
+    }
+  
+    // --- Build tree data starting from entry ---
+    // We'll do a DFS, but avoid infinite recursion by tracking visited along current path.
+    const visiting = new Set();
+  
+    function makeBlockName(id) {
+      // Show id and annotate if it's a return block and optionally include start/end lines
+      const meta = blocksMap[id] || {};
+      let name = String(id);
+      if (returns.includes(id)) name += " (ret)";
+      // optionally show short start/end info:
+      const s = meta.start_line, e = meta.end_line;
+      if (s !== undefined && s !== null) name += ` [L${s}${e ? `-L${e}` : ""}]`;
+      return name;
+    }
+  
+    function buildTree(nodeId) {
+      const nodeName = makeBlockName(nodeId);
+      const node = { id: nodeId, name: nodeName, children: [] };
+  
+      // detect cycle on current path
+      if (visiting.has(nodeId)) {
+        // mark as back-edge and stop recursion
+        return { id: nodeId, name: `${nodeName} (↩)`, children: [] };
+      }
+  
+      visiting.add(nodeId);
+  
+      // 1) Add outgoing control-flow edges as children
+      const outs = adjacency[nodeId] || [];
+      for (const edge of outs) {
+        const to = edge.to;
+        if (!to) continue;
+        if (visiting.has(to)) {
+          node.children.push({ id: to, name: `${String(to)} (↩)`, children: [] });
+        } else {
+          node.children.push(buildTree(to));
+        }
+      }
+  
+      // 2) Add call nodes as annotated children (so calls appear under the block)
+      const callsFrom = callsMap[nodeId] || [];
+      for (const call of callsFrom) {
+        // Represent calls as leaf children with distinct naming
+        node.children.push({
+          id: `${nodeId}->call:${call.dst}`,
+          name: `call → ${call.dst}`,
+          children: [],
+        });
+      }
+  
+      visiting.delete(nodeId);
+      return node;
+    }
+  
+    const treeData = buildTree(entry);
+  
+    // d3 collapsible tree rendering
     const width = container.clientWidth || 900;
-    const height = 600;
-
-    const svg = d3.select(container).append("svg").attr("width", width).attr("height", height);
-
-    const blocks = Object.keys(cfg.blocks || {});
-    const nodes = blocks.map((b, i) => ({ id: b, idx: i }));
-
-    let links = [];
-    if (Array.isArray(cfg.edges)) {
-      links = cfg.edges.map((e) => ({ source: e[0] || e.from, target: e[1] || e.to }));
-    } else if (cfg.edges && typeof cfg.edges === "object") {
-      for (const [from, tos] of Object.entries(cfg.edges)) {
-        for (const to of tos || []) links.push({ source: from, target: to });
+    const height = container.clientHeight || 600;
+    const margin = { top: 20, right: 120, bottom: 20, left: 120 };
+  
+    const svg = d3
+      .select(container)
+      .append("svg")
+      .attr("width", width)
+      .attr("height", height)
+      .attr("viewBox", `0 0 ${width} ${height}`)
+      .style("font", "12px sans-serif");
+  
+    const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+    const innerWidth = width - margin.left - margin.right;
+    const innerHeight = height - margin.top - margin.bottom;
+  
+    const root = d3.hierarchy(treeData, (d) => d.children);
+    root.x0 = innerHeight / 2;
+    root.y0 = 0;
+  
+    // initially collapse deeper levels for readability
+    if (root.children) root.children.forEach(collapse);
+  
+    const treeLayout = d3.tree().size([innerHeight, innerWidth]);
+  
+    update(root);
+  
+    // pan + zoom
+    svg.call(
+      d3.zoom().on("zoom", function (event) {
+        g.attr("transform", event.transform);
+      })
+    );
+  
+    function collapse(d) {
+      if (d.children) {
+        d._children = d.children;
+        d._children.forEach(collapse);
+        d.children = null;
       }
     }
-
-    const simulation = d3.forceSimulation(nodes)
-      .force("charge", d3.forceManyBody().strength(-300))
-      .force("center", d3.forceCenter(width / 2, height / 2))
-      .force("link", d3.forceLink(links).id((d) => d.id).distance(120))
-      .on("tick", ticked);
-
-    const link = svg.append("g").attr("stroke", "#999").selectAll("line").data(links).join("line").attr("stroke-width", 1.5);
-    const node = svg.append("g").selectAll("g").data(nodes).join("g").call(d3.drag().on("start", dragstarted).on("drag", dragged).on("end", dragended));
-
-    node.append("circle").attr("r", 24).attr("fill", "#f3f4f6").attr("stroke", "#333");
-    node.append("text").text((d) => d.id).attr("dy", 4).attr("text-anchor", "middle").attr("font-size", 10);
-
-    function ticked() {
-      link.attr("x1", (d) => d.source.x).attr("y1", (d) => d.source.y).attr("x2", (d) => d.target.x).attr("y2", (d) => d.target.y);
-      node.attr("transform", (d) => `translate(${d.x},${d.y})`);
+    function expand(d) {
+      if (d._children) {
+        d.children = d._children;
+        d.children.forEach(expand);
+        d._children = null;
+      }
     }
-
-    function dragstarted(event, d) {
-      if (!event.active) simulation.alphaTarget(0.3).restart();
-      d.fx = d.x;
-      d.fy = d.y;
+  
+    function update(source) {
+      const duration = 300;
+      const nodes = treeLayout(root).descendants();
+      const links = treeLayout(root).links();
+  
+      nodes.forEach((d) => (d.y = d.depth * 160));
+  
+      // Nodes
+      const node = g.selectAll("g.node").data(nodes, (d) => d.data.id || d.data.name);
+  
+      const nodeEnter = node
+        .enter()
+        .append("g")
+        .attr("class", "node")
+        .attr("transform", (d) => `translate(${source.y0},${source.x0})`)
+        .on("click", function (event, d) {
+          // toggling children
+          if (d.children) {
+            d._children = d.children;
+            d.children = null;
+          } else {
+            d.children = d._children;
+            d._children = null;
+          }
+          update(d);
+        });
+  
+      nodeEnter
+        .append("circle")
+        .attr("class", "node-circle")
+        .attr("r", 1e-6)
+        .attr("stroke", "#333")
+        .attr("fill", (d) => (d._children ? "#cfe2ff" : "#fff"));
+  
+      nodeEnter
+        .append("text")
+        .attr("dy", 3)
+        .attr("x", (d) => (d.children || d._children ? -12 : 12))
+        .style("text-anchor", (d) => (d.children || d._children ? "end" : "start"))
+        .text((d) => d.data.name)
+        .each(function () {
+          const t = d3.select(this);
+          const full = t.text();
+          if (full.length > 40) t.text(full.slice(0, 36) + "…");
+        });
+  
+      const nodeUpdate = nodeEnter.merge(node);
+  
+      nodeUpdate
+        .transition()
+        .duration(duration)
+        .attr("transform", (d) => `translate(${d.y},${d.x})`);
+  
+      nodeUpdate.select("circle.node-circle").attr("r", 8).attr("fill", (d) => (d._children ? "#cfe2ff" : "#fff"));
+  
+      const nodeExit = node
+        .exit()
+        .transition()
+        .duration(duration)
+        .attr("transform", (d) => `translate(${source.y},${source.x})`)
+        .remove();
+  
+      nodeExit.select("circle").attr("r", 1e-6);
+      nodeExit.select("text").style("fill-opacity", 1e-6);
+  
+      // Links
+      const link = g.selectAll("path.link").data(links, (d) => (d.target.data.id || d.target.data.name) + "<-" + (d.source.data.id || d.source.data.name));
+  
+      const linkEnter = link
+        .enter()
+        .insert("path", "g")
+        .attr("class", "link")
+        .attr("d", function () {
+          const o = { x: source.x0, y: source.y0 };
+          return diagonal({ source: o, target: o });
+        })
+        .attr("fill", "none")
+        .attr("stroke", "#555")
+        .attr("stroke-opacity", 0.6)
+        .attr("stroke-width", 1.5);
+  
+      const linkUpdate = linkEnter.merge(link);
+      linkUpdate.transition().duration(duration).attr("d", diagonal);
+  
+      link
+        .exit()
+        .transition()
+        .duration(duration)
+        .attr("d", function () {
+          const o = { x: source.x, y: source.y };
+          return diagonal({ source: o, target: o });
+        })
+        .remove();
+  
+      nodes.forEach((d) => {
+        d.x0 = d.x;
+        d.y0 = d.y;
+      });
     }
-
-    function dragged(event, d) {
-      d.fx = event.x;
-      d.fy = event.y;
-    }
-
-    function dragended(event, d) {
-      if (!event.active) simulation.alphaTarget(0);
-      d.fx = null;
-      d.fy = null;
+  
+    function diagonal(d) {
+      return `M ${d.source.y} ${d.source.x}
+              C ${(d.source.y + d.target.y) / 2} ${d.source.x},
+                ${(d.source.y + d.target.y) / 2} ${d.target.x},
+                ${d.target.y} ${d.target.x}`;
     }
   }
 
