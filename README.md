@@ -23,7 +23,7 @@ First initialize the submodule:
 git submodule update --init --recursive
 ```
 
-Then build the plugin:
+Then build the plugin and link it with LLVM-12:
 
 ```bash
 cd llvm-cfg-to-json
@@ -34,15 +34,30 @@ CC=gcc-9 CXX=g++-9 cmake ../ -DLLVM_DIR=`/path/to/llvm-config-12 --cmakedir`
 Then build your project with the plugin (for example using `make`):
 
 ```bash
-CC=/path/to/clang-12 CXX=/path/to/clang++-12 CFLAGS="-fplugin=/path/to/cov-visualizer/llvm-cfg-to-json/build/libLLVMCFGToJSON.so" CXXFLAGS="-fplugin=/path/to/cov-visualizer/llvm-cfg-to-json/build/libLLVMCFGToJSON.so" make
+CC=/path/to/clang-12 CXX=/path/to/clang-12 \
+CXX=/path/to/clang-12 CXX=/path/to/clang++-12 \
+CFLAGS="-fplugin=/path/to/cov-visualizer/llvm-cfg-to-json/build/libLLVMCFGToJSON.so -O0 -g" \
+CXXFLAGS="-fplugin=/path/to/cov-visualizer/llvm-cfg-to-json/build/libLLVMCFGToJSON.so -O0 -g" make
 ```
 
-# Using the backend
-Setup a python virtual environment and install dependencies:
+Note that the `-O0 -g` flags must be set for LLVM to emit line number information in its IR.
+
+CFGs will be generated and stored in `cfg.<source-file-name>.json` files.
+
+### Using the backend
 
 ```bash
 cd backend
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
+python3 server.py
+```
+
+### Using the frontend
+
+```bash
+cd frontend
+npm install
+npm run dev
 ```
